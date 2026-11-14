@@ -1,0 +1,26 @@
+{
+  "table": "dim_customer",
+  "comment": "客户维表",
+  "columns": [
+    {
+      "name": "customer_id",
+      "type": "bigint",
+      "comment": "客户号"
+    },
+    {
+      "name": "customer_name",
+      "type": "varchar(64)",
+      "comment": "客户名称"
+    },
+    {
+      "name": "city",
+      "type": "varchar(32)",
+      "comment": "城市"
+    },
+    {
+      "name": "level",
+      "type": "varchar(8)",
+      "comment": "客户等级"
+    }
+  ]
+}

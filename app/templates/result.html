@@ -1,0 +1,244 @@
+{% extends "base.html" %}
+{% block title %}{% if run %}解析结果 · {{ run_id }}{% else %}结果不存在{% endif %} · {{ app_name }}{% endblock %}
+{% block crumb %}解析结果{% endblock %}
+{% block meta %}{% if run %}<span class="dot {% if run.failed_count or cycles %}warn{% else %}ok{% endif %}"></span>{{ run.source_label }} · {{ run.created_at }}{% else %}<span class="dot err"></span>运行记录不存在{% endif %}{% endblock %}
+{% block actions %}
+{% if run %}
+<a class="btn secondary small" href="/workbench">回工作台</a>
+<a class="btn secondary small" href="/review?run_id={{ run_id }}&table=ods_orders&column=amount&op=drop">查影响面</a>
+<a class="btn small" href="/api/runs/{{ run_id }}/export?format=json">导出 JSON</a>
+{% endif %}
+{% endblock %}
+{% block status_left %}{% if run %}运行 <span class="mono">{{ run_id }}</span> · 耗时 {{ run.duration_ms }} ms · 表级边 {{ run.table_edge_count }} · 列级边 {{ run.column_edge_count }}{% else %}找不到这条解析记录{% endif %}{% endblock %}
+{% block status_right %}{{ app_name }}{% endblock %}
+
+{% block content %}
+{% if not run %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">找不到这条解析记录</h1>
+    <p class="page-sub">可能已被清理，或链接里的运行号写错。请回工作台重新执行一次解析。</p>
+  </div>
+  <div class="page-head-actions"><a class="btn" href="/workbench">回工作台</a></div>
+</div>
+<div class="panel">
+  <div class="empty"><strong>运行记录不存在</strong>回工作台重新解析后，结果页会给出新的 run_id。</div>
+</div>
+{% else %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">解析结果 · <span class="mono">{{ run_id }}</span></h1>
+    <p class="page-sub">
+      {{ run.source_label }} · {{ run.created_at }} · 耗时 {{ run.duration_ms }} ms ·
+      {% if run.status == 'ok' %}<span class="tag ok">全部解析成功</span>{% else %}<span class="tag warn">存在解析失败</span>{% endif %}
+      · 参与依赖的表 / 视图 {{ run.table_count }} 个
+    </p>
+  </div>
+</div>
+
+<div class="kpi-strip">
+  <div class="kpi {% if run.failed_count %}warn{% else %}ok{% endif %}">
+    <div class="k-label">脚本成功</div>
+    <div class="k-value">{{ run.parsed_count }}/{{ run.script_count }}</div>
+    <div class="k-note">失败 {{ run.failed_count }} 条，单独列出</div>
+  </div>
+  <div class="kpi {% if run.failed_count %}err{% endif %}">
+    <div class="k-label">脚本失败</div>
+    <div class="k-value">{{ run.failed_count }}</div>
+    <div class="k-note">给出行列位置与原因</div>
+  </div>
+  <div class="kpi">
+    <div class="k-label">表级边</div>
+    <div class="k-value">{{ run.table_edge_count }}</div>
+    <div class="k-note">表 / 视图依赖边</div>
+  </div>
+  <div class="kpi">
+    <div class="k-label">列级血缘边</div>
+    <div class="k-value">{{ run.column_edge_count }}</div>
+    <div class="k-note">SELECT * 展开 {{ star_edge_count }} 条 · 函数变换 {{ transform_edge_count }} 条</div>
+  </div>
+  <div class="kpi {% if cycles %}err{% endif %}">
+    <div class="k-label">依赖环</div>
+    <div class="k-value">{{ cycles|length }}</div>
+    <div class="k-note">表级环{% if column_cycles %} · 列级环 {{ column_cycles|length }} 条{% endif %}</div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-head">
+    <div class="segmented">
+      <button type="button" data-tab-target="tab-lineage" class="active">列级血缘</button>
+      <button type="button" data-tab-target="tab-cycles">环</button>
+      <button type="button" data-tab-target="tab-impact">影响面</button>
+      <button type="button" data-tab-target="tab-diagnostics">解析诊断</button>
+    </div>
+    <div class="panel-actions">
+      <span class="tag">{{ column_groups|length }} 个目标对象</span>
+      <a class="btn secondary small" href="/api/runs/{{ run_id }}/export?format=csv">导出 CSV</a>
+    </div>
+  </div>
+
+  <div id="tab-lineage" class="tab-panel">
+    <div class="table-wrap roomy">
+      <table class="dense">
+        <thead>
+          <tr><th>目标表</th><th>目标列</th><th>← 源列</th><th>变换链 / 表达式</th><th>依据</th></tr>
+        </thead>
+        <tbody>
+          {% for g in column_groups %}
+            {% for col in g.columns %}
+              {% for s in col.sources %}
+              <tr>
+                <td class="mono nowrap">{{ g.target_table }}
+                  <div class="small muted">{{ '视图' if g.kind == 'view' else '表' }}</div>
+                </td>
+                <td class="mono nowrap">{{ col.target_column }}</td>
+                <td class="mono nowrap">{{ s.source }}{% if s.star %} <span class="tag warn">* 展开</span>{% endif %}</td>
+                <td>
+                  <span class="mono small">{{ s.transform_chain }}</span>
+                  {% if s.transforms %}<div class="small muted">函数：{{ s.transforms|join(' → ') }}</div>{% endif %}
+                  {% if s.union_branch %}<div class="small muted">UNION 分支 #{{ s.union_branch + 1 }}</div>{% endif %}
+                  <div class="small muted">表达式：<span class="mono">{{ s.expr }}</span></div>
+                </td>
+                <td class="small mono nowrap">{{ s.evidence }}</td>
+              </tr>
+              {% endfor %}
+            {% endfor %}
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="panel-actions">
+      <span class="small muted" style="align-self:center">按目标表分组的列级血缘：每条边都带依据（脚本:行号、原表达式、函数变换链）；<span class="tag warn">* 展开</span> 表示该边来自 SELECT *。</span>
+    </div>
+  </div>
+
+  <div id="tab-cycles" class="tab-panel" hidden>
+    <div class="panel-body tight">
+      <p class="small muted">DFS 三色检测：表级环与列级环分别列出，并给出产生环的脚本依据；环内对象拓扑层级不确定，迁移前应先处理。</p>
+      {% if cycles %}
+      <div class="table-wrap auto">
+        <table class="dense">
+          <thead><tr><th>表级环</th><th>依据（脚本）</th></tr></thead>
+          <tbody>
+            {% for c in cycles %}
+            <tr>
+              <td><span class="tag err">表级环</span> <span class="mono">{{ c.key }}</span></td>
+              <td class="small mono">{{ c.scripts|join(', ') }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty"><strong>没有表级环</strong>本次解析的依赖图可完整拓扑排序。</div>
+      {% endif %}
+      {% if column_cycles %}
+      <details class="help" style="margin-top:10px">
+        <summary>列级环 {{ column_cycles|length }} 条（表级环的列级投影）</summary>
+        <ul class="list small mono" style="margin-bottom:0">
+          {% for c in column_cycles %}<li>{{ c.key }}{% if c.scripts %} · {{ c.scripts|join(', ') }}{% endif %}</li>{% endfor %}
+        </ul>
+      </details>
+      {% endif %}
+    </div>
+  </div>
+
+  <div id="tab-impact" class="tab-panel" hidden>
+    <div class="panel-body tight">
+      <form method="get" action="/review" class="form-inline" style="align-items:end">
+        <input type="hidden" name="run_id" value="{{ run_id }}">
+        <div class="field" style="margin:0">
+          <label for="impact-table">源表</label>
+          <select id="impact-table" name="table">
+            {% for t in levels.keys()|sort %}
+            <option value="{{ t }}" {% if t == 'ods_orders' %}selected{% endif %}>{{ t }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="field" style="margin:0">
+          <label for="impact-column">源列（可留空看整表）</label>
+          <input type="text" id="impact-column" name="column" value="amount" placeholder="例如 amount">
+        </div>
+        <div class="field" style="margin:0">
+          <label for="impact-op">变更动作</label>
+          <select id="impact-op" name="op">
+            <option value="drop">删列（DROP COLUMN）</option>
+            <option value="rename">改名（RENAME COLUMN）</option>
+          </select>
+        </div>
+        <div class="field" style="margin:0">
+          <label for="impact-new-name">新列名（仅改名时必填）</label>
+          <input type="text" id="impact-new-name" name="new_name" placeholder="例如 order_amount">
+        </div>
+        <div class="field" style="margin:0">
+          <label>&nbsp;</label>
+          <button type="submit">查询影响面并生成迁移清单</button>
+        </div>
+      </form>
+      <p class="small muted" style="margin:8px 0 0">
+        影响面按拓扑层级从浅到深列出全部下游对象，标注直接 / 间接；迁移清单按「先改下游、最后删列」生成。
+        也可以直接看 <a href="/review?run_id={{ run_id }}&table=ods_orders&column=amount&op=drop">ods_orders.amount 影响面</a>。
+      </p>
+    </div>
+  </div>
+
+  <div id="tab-diagnostics" class="tab-panel" hidden>
+    <div class="panel-body tight">
+      {% if failures %}
+      <p class="small muted">失败的脚本不影响其它脚本的血缘结果，但会被单独列出，绝不静默跳过。</p>
+      {% for f in failures %}
+      <div class="panel" style="margin-bottom:10px">
+        <div class="panel-head">
+          <h2 class="mono">{{ f.filename }}</h2>
+          <div class="panel-actions">
+            {% if f.line %}<span class="tag err">第 {{ f.line }} 行第 {{ f.col }} 列</span>{% endif %}
+            <span class="tag">{{ f.target or '—' }}</span>
+          </div>
+        </div>
+        <div class="panel-body tight">
+          <p class="small" style="margin-top:0">{{ f.message }}</p>
+          <pre>{% for line in f.snippet.lines %}{{ '%4d'|format(line.no) }} | {{ line.text }}{% if line.hit %}   <-- 出错位置{% endif %}
+{% endfor %}</pre>
+        </div>
+      </div>
+      {% endfor %}
+      {% else %}
+      <div class="empty">
+        <strong>本次运行没有解析失败</strong>
+        想复现诊断定位：回工作台用「解析样例 + 坏脚本」，或粘贴一段括号写错的 SQL。
+      </div>
+      {% endif %}
+    </div>
+    <div class="panel-head" style="border-top:1px solid var(--line)">
+      <h2>表级依赖边（{{ run.table_edge_count }} 条）</h2>
+      <div class="panel-actions"><span class="tag">按目标对象分组</span></div>
+    </div>
+    <div class="table-wrap">
+      <table class="dense">
+        <thead><tr><th>来源表</th><th>目标对象</th><th>类型</th><th>依据</th></tr></thead>
+        <tbody>
+          {% for target, edges in table_groups.items() %}
+            {% for e in edges %}
+            <tr>
+              <td class="mono">{{ e.source_table }}</td>
+              <td class="mono">{{ target }}</td>
+              <td>{{ '视图' if e.target_kind == 'view' else '表' }}</td>
+              <td class="small mono">{{ e.script }}:{{ e.line }}</td>
+            </tr>
+            {% endfor %}
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<details class="help" style="margin-top:12px">
+  <summary>接口调用方式（导出与影响面）</summary>
+  <p class="small muted" style="margin:6px 0">需要换别的列？复核页支持按表 / 列下拉选择；接口也可以直接调：</p>
+  <pre>curl -s -X POST http://127.0.0.1:18214/api/impact -H 'Content-Type: application/json' \
+  -d '{"run_id":"{{ run_id }}","table":"ods_orders","column":"amount"}'</pre>
+</details>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,26 @@
+{
+  "table": "ods_products",
+  "comment": "商品维表源数据",
+  "columns": [
+    {
+      "name": "sku",
+      "type": "varchar(32)",
+      "comment": "商品编码"
+    },
+    {
+      "name": "product_name",
+      "type": "varchar(128)",
+      "comment": "商品名称"
+    },
+    {
+      "name": "category",
+      "type": "varchar(32)",
+      "comment": "类目"
+    },
+    {
+      "name": "brand",
+      "type": "varchar(32)",
+      "comment": "品牌"
+    }
+  ]
+}

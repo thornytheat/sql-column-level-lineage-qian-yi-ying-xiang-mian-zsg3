@@ -1,0 +1,36 @@
+{
+  "table": "ods_orders",
+  "comment": "订单明细源表（ODS 层，CDC 同步自订单库）",
+  "columns": [
+    {
+      "name": "order_id",
+      "type": "bigint",
+      "comment": "订单号"
+    },
+    {
+      "name": "customer_id",
+      "type": "bigint",
+      "comment": "客户号"
+    },
+    {
+      "name": "amount",
+      "type": "decimal(18,2)",
+      "comment": "订单金额"
+    },
+    {
+      "name": "status",
+      "type": "varchar(16)",
+      "comment": "订单状态"
+    },
+    {
+      "name": "channel",
+      "type": "varchar(24)",
+      "comment": "下单渠道"
+    },
+    {
+      "name": "created_at",
+      "type": "timestamp",
+      "comment": "下单时间"
+    }
+  ]
+}

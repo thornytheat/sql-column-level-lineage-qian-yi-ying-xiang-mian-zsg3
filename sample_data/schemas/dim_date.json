@@ -1,0 +1,26 @@
+{
+  "table": "dim_date",
+  "comment": "日历维表（预留，本批脚本暂未引用）",
+  "columns": [
+    {
+      "name": "date_key",
+      "type": "int",
+      "comment": "日期键"
+    },
+    {
+      "name": "year",
+      "type": "int",
+      "comment": "年"
+    },
+    {
+      "name": "month",
+      "type": "int",
+      "comment": "月"
+    },
+    {
+      "name": "is_workday",
+      "type": "tinyint",
+      "comment": "是否工作日"
+    }
+  ]
+}

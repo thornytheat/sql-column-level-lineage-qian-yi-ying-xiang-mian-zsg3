@@ -1,0 +1,184 @@
+{% extends "base.html" %}
+{% block title %}总览 · {{ app_name }}{% endblock %}
+{% block crumb %}总览{% endblock %}
+{% block meta %}<span class="dot {% if latest and latest.failed_count %}warn{% elif latest %}ok{% endif %}"></span>{% if latest %}最近解析 {{ latest.created_at }} · {{ latest.parsed_count }}/{{ latest.script_count }} 脚本{% else %}尚无解析记录{% endif %}{% endblock %}
+{% block actions %}
+<a class="btn secondary small" href="/review">复核与导出</a>
+<a class="btn small" href="/workbench">去工作台</a>
+{% endblock %}
+{% block status_left %}样例脚本 {{ stats.sample_scripts }} 条 · 表结构 {{ stats.schema_tables }} 张 · 历史解析 {{ stats.runs }} 次 · 不依赖外网{% endblock %}
+{% block status_right %}{{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">总览</h1>
+    <p class="page-sub">
+      使用者：数仓建模组。改字段之前，先看清这一刀会切到谁 —— 删掉 / 改名
+      <span class="mono">ods_orders.amount</span> 这类源表字段时，先看它会传到哪些下游视图与任务、按什么顺序改。
+    </p>
+  </div>
+  <div class="page-head-actions">
+    <a class="btn small" href="/workbench">去工作台解析</a>
+  </div>
+</div>
+
+<div class="kpi-strip">
+  <div class="kpi">
+    <div class="k-label">样例脚本</div>
+    <div class="k-value">{{ stats.sample_scripts }}</div>
+    <div class="k-note">正常样例 {{ stats.sample_scripts }} 条 + 坏脚本 {{ stats.broken_scripts }} 条</div>
+  </div>
+  <div class="kpi">
+    <div class="k-label">表级边</div>
+    <div class="k-value">{{ latest.table_edge_count if latest else '—' }}</div>
+    <div class="k-note">表 / 视图之间的依赖边</div>
+  </div>
+  <div class="kpi">
+    <div class="k-label">列级边</div>
+    <div class="k-value">{{ latest.column_edge_count if latest else '—' }}</div>
+    <div class="k-note">每条带「脚本:行号」依据</div>
+  </div>
+  <div class="kpi {% if latest and latest.cycle_count %}err{% endif %}">
+    <div class="k-label">依赖环</div>
+    <div class="k-value">{{ latest.cycle_count if latest else '—' }}</div>
+    <div class="k-note">DFS 三色，环内不可排序执行</div>
+  </div>
+  <div class="kpi {% if latest and latest.failed_count %}warn{% endif %}">
+    <div class="k-label">解析失败</div>
+    <div class="k-value">{{ latest.failed_count if latest else '—' }}</div>
+    <div class="k-note">失败脚本单独列出，不静默跳过</div>
+  </div>
+</div>
+
+{% if cycles %}
+<div class="alert alert-error" role="alert">
+  检测到 {{ cycles|length }} 条表级环：{% for c in cycles %}<span class="mono">{{ c.key }}</span>{% if not loop.last %}；{% endif %}{% endfor %}
+  —— 环内对象无法排序执行，迁移前必须先处理。
+</div>
+{% endif %}
+
+<div class="split result">
+  <section class="panel">
+    <div class="panel-head">
+      <h2>最近解析</h2>
+      <div class="panel-actions">
+        <span class="tag">{{ stats.runs }} 次历史</span>
+        <a class="btn secondary small" href="/workbench">去解析</a>
+      </div>
+    </div>
+    {% if runs %}
+    <div class="table-wrap roomy">
+      <table class="dense">
+        <thead>
+          <tr><th>运行</th><th>来源</th><th>脚本</th><th>表级边</th><th>列级边</th><th>环</th><th>失败</th><th></th></tr>
+        </thead>
+        <tbody>
+          {% for r in runs %}
+          <tr>
+            <td class="nowrap">
+              <span class="small muted">{{ r.created_at }}</span>
+              <div class="small mono">{{ r.run_id }}</div>
+            </td>
+            <td class="cell-ellipsis">{{ r.source_label }}</td>
+            <td>{{ r.parsed_count }}/{{ r.script_count }}</td>
+            <td>{{ r.table_edge_count }}</td>
+            <td>{{ r.column_edge_count }}</td>
+            <td>{% if r.cycle_count %}<span class="tag err">{{ r.cycle_count }}</span>{% else %}<span class="tag ok">0</span>{% endif %}</td>
+            <td>{% if r.failed_count %}<span class="tag warn">{{ r.failed_count }}</span>{% else %}0{% endif %}</td>
+            <td><a class="small" href="/result/{{ r.run_id }}">查看结果</a></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="empty">
+      <strong>还没有解析记录</strong>
+      去工作台加载样例并解析，结果会落到 SQLite 历史里。
+      <p><a class="btn small" href="/workbench">打开工作台</a></p>
+    </div>
+    {% endif %}
+  </section>
+
+  <div>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>快捷操作</h2>
+        <div class="panel-actions"><span class="tag">3 步入门</span></div>
+      </div>
+      <div class="panel-body tight">
+        <form method="post" action="/runs/submit" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+          <button type="submit" name="mode" value="sample" class="small">解析样例（12 个脚本）</button>
+          <button type="submit" name="mode" value="sample_broken" class="secondary small">解析样例 + 坏脚本</button>
+        </form>
+        <p class="small" style="margin:0 0 8px">
+          <a href="/review?run_id={{ latest.run_id if latest else '' }}&table=ods_orders&column=amount">直接看 ods_orders.amount 影响面</a>
+          {% if latest %}· <a href="/result/{{ latest.run_id }}">最近一次结果</a>{% endif %}
+        </p>
+        <ol class="list small" style="margin-bottom:0">
+          <li>进工作台点「解析样例」，拿到 12 条解析结论与列级血缘边。</li>
+          <li>结果页按目标表看每条边的依据：脚本:行号、原表达式、函数变换链。</li>
+          <li>复核页选 <span class="mono">ods_orders.amount</span> 生成影响面与 6 步迁移清单，再导出 JSON / CSV。</li>
+        </ol>
+      </div>
+      <div class="panel-actions">
+        <a class="btn small" href="/workbench">打开 SQL 工作台</a>
+        <a class="btn secondary small" href="/review">看影响面与迁移清单</a>
+      </div>
+    </section>
+
+    <details class="help" style="margin-top:12px">
+      <summary>演示步骤、样例仓库与核心规则（展开看完整说明）</summary>
+      <div style="margin-top:8px">
+        <p class="small" style="margin:0 0 8px">
+          <strong>场景</strong>：要删掉 / 改名 <span class="mono">ods_orders.amount</span> 这类源表字段，
+          得先知道它会传到哪些下游视图与任务、按什么顺序改，再决定动手。
+        </p>
+        <h3 style="font-size:13px">演示步骤（4 步）</h3>
+        <ol class="list small">
+          <li>打开 <a href="/workbench">工作台</a>，点击「解析样例（12 个脚本）」，得到 12 条脚本解析结论、53 条列级血缘边与 1 条表级环。</li>
+          <li>在结果页按目标表查看列级关系：每条边都写明「哪个脚本哪一行、什么表达式、经过什么函数变换」。</li>
+          <li>回到工作台，点击「解析样例 + 坏脚本」，或粘贴一段写错的 SQL，看解析错误定位到第几行第几列。</li>
+          <li>打开 <a href="/review?run_id={{ latest.run_id if latest else '' }}&table=ods_orders&column=amount">复核与导出</a>，选 <span class="mono">ods_orders.amount</span> 生成影响面与 6 步迁移清单，再导出 JSON / CSV。</li>
+        </ol>
+
+        <h3 style="font-size:13px">样例仓库里有什么</h3>
+        <p class="small muted" style="margin:0 0 6px">12 个脚本覆盖 7 种写法；其中 11、12 两个视图故意互相引用形成 1 条表级环；坏脚本单独放在 sql_broken/，不会污染样例基线。</p>
+        <div class="table-wrap auto">
+          <table class="dense">
+            <thead><tr><th>脚本</th><th>类型</th><th>样例集</th></tr></thead>
+            <tbody>
+              {% for s in scripts %}
+              <tr>
+                <td class="mono">{{ s.filename }}</td>
+                <td>{{ '样例（可解析）' if s.set_name == 'sample' else '坏脚本（演示诊断）' }}</td>
+                <td>
+                  {% if s.set_name == 'sample' %}<span class="tag ok">sample</span>
+                  {% else %}<span class="tag err">broken</span>{% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+
+        <h3 style="font-size:13px">核心规则（后端真算）</h3>
+        <ul class="list small">
+          <li>轻量词法 + 递归下降解析：CREATE TABLE/VIEW、INSERT INTO、别名、JOIN、子查询、UNION ALL、SELECT *；失败给行列位置。</li>
+          <li>列级血缘：目标列 ← 源列，子查询向外传播；函数保留源列身份并记录变换链；UNION ALL 按序号对齐。</li>
+          <li>环检测：表级 / 列级 DFS 三色，输出环路径与产生环的脚本行。</li>
+          <li>影响面：按拓扑层级排序，标注直接 / 间接；迁移清单按「先改下游、最后删列」生成。</li>
+        </ul>
+
+        <h3 style="font-size:13px">输入与输出</h3>
+        <ul class="list small">
+          <li>输入：SQL 脚本（样例 12 条 / 自录 1 条）+ 7 张表的 schema JSON。</li>
+          <li>输出：解析诊断、列级血缘边（含证据行号）、环路径、影响面清单、迁移步骤、JSON/CSV 导出。</li>
+          <li>持久化：SQLite 命名卷 <span class="mono">lineagex-data</span>，重启不丢历史；seed 幂等。</li>
+        </ul>
+      </div>
+    </details>
+  </div>
+</div>
+{% endblock %}

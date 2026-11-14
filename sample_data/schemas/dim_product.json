@@ -1,0 +1,21 @@
+{
+  "table": "dim_product",
+  "comment": "商品维表",
+  "columns": [
+    {
+      "name": "sku",
+      "type": "varchar(32)",
+      "comment": "商品编码"
+    },
+    {
+      "name": "product_name",
+      "type": "varchar(128)",
+      "comment": "商品名称"
+    },
+    {
+      "name": "category",
+      "type": "varchar(32)",
+      "comment": "类目"
+    }
+  ]
+}

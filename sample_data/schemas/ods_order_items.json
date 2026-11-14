@@ -1,0 +1,31 @@
+{
+  "table": "ods_order_items",
+  "comment": "订单行明细源表",
+  "columns": [
+    {
+      "name": "item_id",
+      "type": "bigint",
+      "comment": "行号"
+    },
+    {
+      "name": "order_id",
+      "type": "bigint",
+      "comment": "订单号"
+    },
+    {
+      "name": "sku",
+      "type": "varchar(32)",
+      "comment": "商品编码"
+    },
+    {
+      "name": "qty",
+      "type": "int",
+      "comment": "数量"
+    },
+    {
+      "name": "unit_price",
+      "type": "decimal(18,2)",
+      "comment": "单价"
+    }
+  ]
+}

@@ -1,0 +1,257 @@
+{% extends "base.html" %}
+{% block title %}SQL 工作台 · {{ app_name }}{% endblock %}
+{% block crumb %}SQL 工作台{% endblock %}
+{% block meta %}<span class="dot {% if latest and latest.failed_count %}warn{% else %}ok{% endif %}"></span>{% if latest %}最近解析 {{ latest.parsed_count }}/{{ latest.script_count }} 脚本 · 列边 {{ latest.column_edge_count }}{% else %}样例仓库就绪 · 尚无解析记录{% endif %}{% endblock %}
+{% block actions %}
+<button type="submit" form="run-form" name="mode" value="sample" class="btn small">解析样例（12 个脚本）</button>
+<button type="submit" form="run-form" name="mode" value="sample_broken" class="btn secondary small">解析样例 + 坏脚本</button>
+{% endblock %}
+{% block status_left %}样例 12 正常 + 1 坏脚本 · 表结构 7 张 · 结果落 SQLite（命名卷 lineagex-data）{% endblock %}
+{% block status_right %}{% if latest %}最近 run_id <span class="mono">{{ latest.run_id }}</span>{% else %}{{ app_name }}{% endif %}{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">SQL 工作台</h1>
+    <p class="page-sub">
+      选择样例集一键解析，或粘贴一条自定义脚本；解析结果会进入结果页并落到 SQLite 历史里。
+      失败脚本不会影响其它脚本的血缘结果，但会单独列出错误行列位置。
+    </p>
+  </div>
+</div>
+
+<div class="split">
+  <section class="panel pane-sticky" id="m1">
+    <div class="panel-head">
+      <h2>SQL 仓库与执行</h2>
+      <div class="panel-actions"><span class="tag">样例 12 + 坏 1</span></div>
+    </div>
+    <div class="panel-body">
+      <form method="post" action="/runs/submit" id="run-form">
+        <div class="field">
+          <label for="filename">脚本名（自定义录入时使用）</label>
+          <input type="text" id="filename" name="filename" value="{{ filename or 'my_new_view.sql' }}" placeholder="例如 my_new_view.sql">
+        </div>
+        <div class="field">
+          <label for="sql">SQL 脚本（单条语句：CREATE TABLE/VIEW ... AS SELECT 或 INSERT INTO ... SELECT）</label>
+          <textarea id="sql" name="sql" spellcheck="false" placeholder="CREATE VIEW v_demo AS
+SELECT o.order_id AS order_id, o.amount AS amount
+FROM ods_orders o;">{{ sql or '' }}</textarea>
+        </div>
+        <p class="small muted">试试把括号写错，或引用一个不存在的表：解析会返回具体行列位置，不会静默跳过。</p>
+
+        <details class="help">
+          <summary>样例脚本清单（12 条正常 + 1 条坏脚本）</summary>
+          <div class="table-wrap auto">
+            <table class="dense">
+              <thead><tr><th>文件</th><th>集合</th><th>行数</th></tr></thead>
+              <tbody>
+                {% for s in scripts %}
+                <tr>
+                  <td class="mono">{{ s.filename }}</td>
+                  <td>{% if s.set_name == 'sample' %}<span class="tag ok">sample</span>{% else %}<span class="tag err">broken</span>{% endif %}</td>
+                  <td>{{ s.sql.split('\n')|length }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </details>
+
+        <details class="help" style="margin-top:10px">
+          <summary>解析器支持与不支持什么</summary>
+          <ul class="list small" style="margin-bottom:0">
+            <li>支持：CREATE TABLE/VIEW ... AS SELECT、INSERT INTO ... SELECT、AS/隐式别名、JOIN ... ON、单层与嵌套子查询、UNION ALL、SELECT * 与 t.* 展开（按 schema）。</li>
+            <li>函数包裹（CAST/COALESCE/ROUND/SUM/AVG/COUNT/TRIM/UPPER）：保留源列身份，记录由外到内的变换链。</li>
+            <li>不支持：WITH、多语句脚本、窗口函数；遇到会明确报错并给位置，而不是跳过。</li>
+          </ul>
+        </details>
+      </form>
+    </div>
+    <div class="panel-actions">
+      <button type="submit" form="run-form" name="mode" value="sample">解析样例（12 个脚本）</button>
+      <button type="submit" form="run-form" name="mode" value="sample_broken" class="secondary">样例 + 坏脚本</button>
+      <button type="submit" form="run-form" name="mode" value="custom" class="secondary">解析自定义 SQL</button>
+    </div>
+  </section>
+
+  <div>
+    <div class="kpi-strip">
+      <div class="kpi">
+        <div class="k-label">脚本成功</div>
+        <div class="k-value">{{ latest.parsed_count if latest else '—' }}/{{ latest.script_count if latest else '—' }}</div>
+        <div class="k-note">最近一次解析</div>
+      </div>
+      <div class="kpi {% if latest and latest.failed_count %}warn{% endif %}">
+        <div class="k-label">解析失败</div>
+        <div class="k-value">{{ latest.failed_count if latest else '—' }}</div>
+        <div class="k-note">逐条给出行列位置</div>
+      </div>
+      <div class="kpi">
+        <div class="k-label">表级边</div>
+        <div class="k-value">{{ latest.table_edge_count if latest else '—' }}</div>
+        <div class="k-note">表 / 视图依赖</div>
+      </div>
+      <div class="kpi">
+        <div class="k-label">列级边</div>
+        <div class="k-value">{{ latest.column_edge_count if latest else '—' }}</div>
+        <div class="k-note">带脚本:行号依据</div>
+      </div>
+      <div class="kpi {% if latest and latest.cycle_count %}err{% endif %}">
+        <div class="k-label">依赖环</div>
+        <div class="k-value">{{ latest.cycle_count if latest else '—' }}</div>
+        <div class="k-note">环内不可排序执行</div>
+      </div>
+    </div>
+
+    {% if diagnostics %}
+    <section class="panel">
+      <div class="panel-head">
+        <h2>解析未通过</h2>
+        <div class="panel-actions"><span class="tag err">{{ diagnostics|length }} 处错误</span></div>
+      </div>
+      <div class="table-wrap auto">
+        <table class="dense">
+          <thead><tr><th>脚本</th><th>位置</th><th>原因</th></tr></thead>
+          <tbody>
+            {% for d in diagnostics %}
+            <tr>
+              <td class="mono">{{ d.filename }}</td>
+              <td class="nowrap"><span class="tag err">第 {{ d.line }} 行第 {{ d.col }} 列</span></td>
+              <td>{{ d.message }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    {% endif %}
+
+    <section class="panel" id="m2">
+      <div class="panel-head">
+        <h2>解析诊断（最近一次运行）</h2>
+        <div class="panel-actions">
+          {% if latest %}<span class="tag">{{ latest.created_at }}</span>{% endif %}
+          <span class="tag {% if failures %}err{% else %}ok{% endif %}">{{ failures|length }} 条失败</span>
+        </div>
+      </div>
+      {% if failures %}
+      <div class="table-wrap">
+        <table class="dense">
+          <thead><tr><th>脚本</th><th>位置</th><th>原因</th></tr></thead>
+          <tbody>
+            {% for f in failures %}
+            <tr>
+              <td class="mono">{{ f.filename }}</td>
+              <td class="nowrap">{% if f.line %}<span class="tag err">第 {{ f.line }} 行第 {{ f.col }} 列</span>{% else %}—{% endif %}</td>
+              <td>{{ f.message }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty">
+        <strong>本次运行没有解析失败</strong>
+        失败脚本会被单独列出，绝不静默跳过；带坏脚本的模式可在左面板「样例 + 坏脚本」触发。
+      </div>
+      {% endif %}
+    </section>
+
+    <section class="panel" id="m3">
+      <div class="panel-head">
+        <h2>列级血缘（{{ latest.column_edge_count if latest else 0 }} 条边）</h2>
+        <div class="panel-actions">
+          {% if latest %}<a class="btn secondary small" href="/result/{{ latest.run_id }}">结果页看全量</a>{% endif %}
+        </div>
+      </div>
+      {% if column_groups %}
+      <div class="table-wrap roomy">
+        <table class="dense">
+          <thead><tr><th>目标列（所属表）</th><th>← 源列</th><th>变换链 / 表达式</th><th>依据</th></tr></thead>
+          <tbody>
+            {% for g in column_groups %}
+              {% for col in g.columns %}
+                {% for s in col.sources %}
+                <tr>
+                  <td class="mono nowrap">{{ col.target_column }}<div class="small muted">{{ g.target_table }}</div></td>
+                  <td class="mono nowrap">{{ s.source }}{% if s.star %} <span class="tag warn">* 展开</span>{% endif %}</td>
+                  <td>
+                    <span class="mono small">{{ s.transform_chain }}</span>
+                    <div class="small muted">表达式：<span class="mono">{{ s.expr }}</span></div>
+                  </td>
+                  <td class="small mono nowrap">{{ s.evidence }}</td>
+                </tr>
+                {% endfor %}
+              {% endfor %}
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty">
+        <strong>还没有列级血缘</strong>
+        在左面板执行一次「解析样例（12 个脚本）」即可生成。
+      </div>
+      {% endif %}
+    </section>
+
+    <section class="panel" id="m4">
+      <div class="panel-head">
+        <h2>环检测（DFS 三色）</h2>
+        <div class="panel-actions"><span class="tag {% if cycles %}err{% else %}ok{% endif %}">{{ cycles|length }} 条表级环</span></div>
+      </div>
+      {% if cycles %}
+      <div class="table-wrap auto">
+        <table class="dense">
+          <thead><tr><th>环路径</th><th>依据（脚本）</th><th>说明</th></tr></thead>
+          <tbody>
+            {% for c in cycles %}
+            <tr>
+              <td class="mono">{{ c.key }}</td>
+              <td class="small mono">{{ c.scripts|join(', ') }}</td>
+              <td class="small muted">环内对象无法排序执行，迁移前必须先处理（改指向或临时物化）。</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty">
+        <strong>本次运行没有表级环</strong>
+        样例仓库中 11、12 两个视图故意互相引用，解析样例即可复现 1 条表级环。
+      </div>
+      {% endif %}
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>历史解析</h2>
+        <div class="panel-actions"><span class="tag">{{ runs|length }} 条</span></div>
+      </div>
+      {% if runs %}
+      <div class="table-wrap">
+        <table class="dense">
+          <thead><tr><th>运行</th><th>来源</th><th>脚本</th><th>列边</th><th>环</th><th>失败</th><th></th></tr></thead>
+          <tbody>
+            {% for r in runs %}
+            <tr>
+              <td class="nowrap"><span class="small muted">{{ r.created_at }}</span><div class="small mono">{{ r.run_id }}</div></td>
+              <td class="cell-ellipsis">{{ r.source_label }}</td>
+              <td>{{ r.parsed_count }}/{{ r.script_count }}</td>
+              <td>{{ r.column_edge_count }}</td>
+              <td>{% if r.cycle_count %}<span class="tag err">{{ r.cycle_count }}</span>{% else %}<span class="tag ok">0</span>{% endif %}</td>
+              <td>{% if r.failed_count %}<span class="tag warn">{{ r.failed_count }}</span>{% else %}0{% endif %}</td>
+              <td><a class="small" href="/result/{{ r.run_id }}">结果</a></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty"><strong>还没有历史记录</strong>点击左面板「解析样例」开始。</div>
+      {% endif %}
+    </section>
+  </div>
+</div>
+{% endblock %}

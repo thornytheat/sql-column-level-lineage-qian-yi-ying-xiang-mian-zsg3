@@ -1,0 +1,283 @@
+{% extends "base.html" %}
+{% block title %}影响面与迁移清单 · {{ app_name }}{% endblock %}
+{% block crumb %}影响面与迁移清单{% endblock %}
+{% block meta %}{% if impact and impact.found %}<span class="dot {% if impact.max_level and cycles %}warn{% else %}ok{% endif %}"></span>{{ impact.seed }} · 下游 {{ impact.object_count }} 个 · 迁移 {{ migration.step_count if migration else 0 }} 步{% elif runs %}<span class="dot warn"></span>{{ table }}.{{ column or '整表' }} 没有下游边{% else %}<span class="dot warn"></span>尚无解析记录{% endif %}{% endblock %}
+{% block actions %}
+{% if impact and impact.found %}
+<a class="btn secondary small" href="/api/runs/{{ run_id }}/export?format=json">导出 JSON</a>
+<a class="btn secondary small" href="/api/runs/{{ run_id }}/export?format=csv">导出 CSV</a>
+{% endif %}
+<a class="btn small" href="/workbench">回工作台</a>
+{% endblock %}
+{% block status_left %}{% if run %}解析记录 <span class="mono">{{ run_id }}</span> · {{ run.source_label }} · {{ run.created_at }}{% else %}选择解析记录后查询影响面{% endif %}{% endblock %}
+{% block status_right %}{{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">影响面查询与迁移清单</h1>
+    <p class="page-sub">
+      选一个源表字段 + 变更动作，系统按拓扑层级列出全部下游对象，并生成「先改下游、最后删列」的有序步骤；
+      每行都带脚本:行号依据，导出 JSON / CSV 可直接交给调度同学执行。
+    </p>
+  </div>
+</div>
+
+{% if not runs %}
+<div class="panel">
+  <div class="empty">
+    <strong>还没有任何解析记录</strong>
+    请先到工作台执行样例解析，再回来查询影响面。
+    <p><a class="btn small" href="/workbench">打开工作台</a></p>
+  </div>
+</div>
+{% else %}
+
+<section class="panel" style="margin-bottom:12px">
+  <form method="get" action="/review" id="impact-form">
+    <div class="toolbar">
+      <label class="small muted" for="run_id">解析记录</label>
+      <select name="run_id" id="run_id" aria-label="解析记录" style="min-width:240px">
+        {% for r in runs %}
+        <option value="{{ r.run_id }}" {% if r.run_id == run_id %}selected{% endif %}>
+          {{ r.created_at }} · {{ r.source_label }}（{{ r.column_edge_count }} 列边）
+        </option>
+        {% endfor %}
+      </select>
+      <label class="small muted" for="table">源表</label>
+      <select name="table" id="table" data-run="{{ run_id }}" aria-label="源表">
+        {% for t in table_options %}
+        <option value="{{ t }}" {% if t == table %}selected{% endif %}>{{ t }}</option>
+        {% endfor %}
+      </select>
+      <label class="small muted" for="column">源列</label>
+      <select name="column" id="column" aria-label="源列">
+        <option value="" {% if not column %}selected{% endif %}>{{ '（整表）' if columns else '（整表）' }}</option>
+        {% for c in columns %}
+        <option value="{{ c }}" {% if c == column %}selected{% endif %}>{{ c }}</option>
+        {% endfor %}
+      </select>
+      <label class="small muted" for="op">动作</label>
+      <select name="op" id="op" aria-label="变更动作">
+        <option value="drop" {% if op == 'drop' %}selected{% endif %}>删列（DROP COLUMN）</option>
+        <option value="rename" {% if op == 'rename' %}selected{% endif %}>改名（RENAME COLUMN）</option>
+      </select>
+      <input type="text" name="new_name" id="new_name" value="{{ new_name }}" placeholder="新列名（改名时必填）" aria-label="新列名（仅改名时必填）">
+      <button type="submit" class="small">查询影响面并生成迁移清单</button>
+    </div>
+  </form>
+</section>
+
+{% if impact and impact.found %}
+<div class="kpi-strip">
+  <div class="kpi">
+    <div class="k-label">下游对象</div>
+    <div class="k-value">{{ impact.object_count }}</div>
+    <div class="k-note">直接 {{ impact.direct_count }} / 间接 {{ impact.indirect_count }}</div>
+  </div>
+  <div class="kpi">
+    <div class="k-label">受影响的下游列</div>
+    <div class="k-value">{{ impact.column_count }}</div>
+    <div class="k-note">按列级血缘向下传播</div>
+  </div>
+  <div class="kpi">
+    <div class="k-label">最大拓扑层级</div>
+    <div class="k-value">L{{ impact.max_level }}</div>
+    <div class="k-note">{{ impact.seed }}</div>
+  </div>
+  <div class="kpi ok">
+    <div class="k-label">迁移步骤</div>
+    <div class="k-value">{{ migration.step_count if migration else 0 }} 步</div>
+    <div class="k-note">物理表回填 {{ migration.backfill_count if migration else 0 }} 个</div>
+  </div>
+</div>
+
+<div class="split result">
+  <section class="panel" id="m5">
+    <div class="panel-head">
+      <h2>影响面：<span class="mono">{{ impact.seed }}</span></h2>
+      <div class="panel-actions">
+        <span class="tag warn">直接 {{ impact.direct_count }}</span>
+        <span class="tag">间接 {{ impact.indirect_count }}</span>
+      </div>
+    </div>
+    <div class="toolbar">
+      <input type="search" id="review-search" placeholder="搜索表名 / 列名 / 依据（脚本:行）" aria-label="搜索影响面" style="min-width:240px">
+      <select id="review-level" aria-label="按层级筛选">
+        <option value="">全部层级</option>
+        {% for lv in range(1, impact.max_level + 1) %}
+        <option value="L{{ lv }}">L{{ lv }}</option>
+        {% endfor %}
+        {% if impact.downstream | selectattr('level', 'none') | list %}<option value="cycle">环内</option>{% endif %}
+      </select>
+      <span class="spacer"></span>
+      <span class="small muted" id="review-stat">共 {{ impact.object_count }} 个下游对象</span>
+      <a class="btn secondary small" href="/api/runs/{{ run_id }}/export?format=json">导出 JSON</a>
+      <a class="btn secondary small" href="/api/runs/{{ run_id }}/export?format=csv">导出 CSV</a>
+    </div>
+    {% if impact.downstream %}
+    <div class="table-wrap roomy">
+      <table class="dense" id="impact-table">
+        <thead>
+          <tr><th>层级</th><th>下游对象</th><th>类型</th><th>距离</th><th>关系</th><th>受影响列</th><th>依据（脚本:行）</th></tr>
+        </thead>
+        <tbody>
+          {% for it in impact.downstream %}
+          <tr data-level="{{ 'L' ~ it.level if it.level is not none else 'cycle' }}"
+              data-search="{{ (it.object ~ ' ' ~ it.kind ~ ' ' ~ it.columns|join(' ') ~ ' ' ~ it.evidence|join(' ') ~ ' ' ~ it.relation)|lower }}">
+            <td>{% if it.level is none %}<span class="tag err">环内</span>{% else %}L{{ it.level }}{% endif %}</td>
+            <td class="mono nowrap">{{ it.object }}</td>
+            <td class="nowrap">{{ '视图' if it.kind == 'view' else '表' }}</td>
+            <td>{{ it.distance }}</td>
+            <td>{% if it.relation == 'direct' %}<span class="tag warn">直接</span>{% else %}<span class="tag">间接</span>{% endif %}</td>
+            <td class="mono small nowrap">{{ it.columns|join(', ') }}</td>
+            <td class="small mono">{% for ev in it.evidence %}<div class="nowrap">{{ ev }}</div>{% endfor %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="panel-actions">
+      <span class="small muted" style="align-self:center">按拓扑层级从浅到深排序；距离 1 为直接下游，≥2 为间接。筛选只影响当前视图，不重新请求服务端。</span>
+    </div>
+    {% else %}
+    <div class="empty">
+      <strong>该字段没有任何下游引用</strong>
+      可以直接变更；若想确认整表影响面，把源列留空再查一次。
+    </div>
+    {% endif %}
+  </section>
+
+  <section class="panel pane-sticky" id="m6">
+    <div class="panel-head">
+      <h2>迁移清单：<span class="mono">{{ migration.table }}.{{ migration.column }}</span> · {{ '删列' if migration.operation == 'drop' else '改名' }}</h2>
+      <div class="panel-actions"><span class="tag ok">{{ migration.step_count }} 步</span></div>
+    </div>
+    <div class="panel-body">
+      <p class="small muted" style="margin-top:0">
+        受影响对象 {{ migration.affected_objects }} 个（直接 {{ migration.direct_count }} / 间接 {{ migration.indirect_count }}），
+        其中物理表需回填 {{ migration.backfill_count }} 个。
+      </p>
+      <ol class="steps">
+        {% for step in migration.steps %}
+        <li style="display:block">
+          <div><strong>{{ step.order }}. {{ step.title }}</strong> <span class="tag">{{ step.action }}</span></div>
+          <div class="small muted">{{ step.detail }}</div>
+          {% if step.objects %}
+          <div class="small" style="margin-top:4px">
+            {% for o in step.objects %}
+            <div><span class="mono">{{ o.object }}</span>（{{ '视图' if o.kind == 'view' else '表' }}，L{{ o.level if o.level is not none else '环内' }}）：
+              <span class="mono">{{ o.columns|join(', ') }}</span>
+              {% if o.evidence %}<span class="muted">· {{ o.evidence|join(', ') }}</span>{% endif %}
+            </div>
+            {% endfor %}
+          </div>
+          {% endif %}
+        </li>
+        {% endfor %}
+      </ol>
+      {% if migration.ddl_sql %}
+      <h3 class="small" style="margin-bottom:2px">最后执行的 DDL</h3>
+      <pre style="margin-top:4px">{{ migration.ddl_sql }}</pre>
+      {% endif %}
+      {% if migration.warnings %}
+      <div class="alert alert-info small" style="margin-bottom:0">
+        {% for w in migration.warnings %}<div>· {{ w }}</div>{% endfor %}
+      </div>
+      {% endif %}
+    </div>
+    <div class="panel-actions">
+      <a class="btn secondary small" href="/api/runs/{{ run_id }}/impact_export?table={{ table }}&column={{ column }}&operation={{ op }}{% if new_name %}&new_name={{ new_name }}{% endif %}">导出影响面 + 迁移清单 JSON</a>
+    </div>
+  </section>
+</div>
+
+{% if cycles %}
+<section class="panel" style="margin-top:12px">
+  <div class="panel-head">
+    <h2>注意：本次解析存在表级环</h2>
+    <div class="panel-actions"><span class="tag err">{{ cycles|length }} 条</span></div>
+  </div>
+  <div class="panel-body tight">
+    <ul class="list small" style="margin:0">
+      {% for c in cycles %}<li><span class="mono">{{ c.key }}</span> · {{ c.scripts|join(', ') }}</li>{% endfor %}
+    </ul>
+    <p class="small muted" style="margin:8px 0 0">环内对象拓扑层级不确定，迁移前应先处理环（改指向或临时物化）。</p>
+  </div>
+</section>
+{% endif %}
+
+<details class="help" style="margin-top:12px">
+  <summary>API 调用方式（不经页面也能拿到同样的影响面与迁移清单）</summary>
+  <pre>curl -s -X POST http://127.0.0.1:18214/api/impact \
+  -H 'Content-Type: application/json' \
+  -d '{"run_id":"{{ run_id }}","table":"{{ table }}","column":"{{ column }}"}'</pre>
+  <pre>curl -s -X POST http://127.0.0.1:18214/api/migration \
+  -H 'Content-Type: application/json' \
+  -d '{"run_id":"{{ run_id }}","table":"{{ table }}","column":"{{ column }}","operation":"{{ op }}"}'</pre>
+</details>
+
+{% elif error %}
+<div class="panel">
+  <div class="empty">
+    <strong>这条查询没有结果</strong>
+    {{ error }}
+    <p style="margin-top:8px"><a class="btn small" href="/review?run_id={{ run_id }}">看整表影响面</a></p>
+  </div>
+</div>
+{% endif %}
+
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // 原生 JS：切换源表时更新列下拉；影响面表格支持表/列搜索与层级筛选。
+  (function () {
+    var form = document.getElementById('impact-form');
+    if (!form) return;
+    var tableSel = form.querySelector('#table');
+    var colSel = form.querySelector('#column');
+    if (tableSel && colSel) {
+      tableSel.addEventListener('change', async function () {
+        colSel.innerHTML = '<option value="">（整表）</option>';
+        try {
+          var res = await fetch('/api/tables?run_id=' + encodeURIComponent(form.querySelector('#run_id').value));
+          var data = await res.json();
+          var found = (data.tables || []).find(function (t) { return t.name === tableSel.value; });
+          (found && found.columns || []).forEach(function (c) {
+            var opt = document.createElement('option');
+            opt.value = c; opt.textContent = c;
+            colSel.appendChild(opt);
+          });
+        } catch (e) {
+          /* 失败时保留服务端渲染的选项 */
+        }
+      });
+    }
+
+    var search = document.getElementById('review-search');
+    var level = document.getElementById('review-level');
+    var table = document.getElementById('impact-table');
+    var stat = document.getElementById('review-stat');
+    if (!table) return;
+    var rows = Array.prototype.slice.call(table.querySelectorAll('tbody tr[data-level]'));
+    function apply() {
+      var q = ((search && search.value) || '').trim().toLowerCase();
+      var lv = (level && level.value) || '';
+      var shown = 0;
+      rows.forEach(function (tr) {
+        var okQ = !q || (tr.getAttribute('data-search') || '').indexOf(q) >= 0;
+        var okL = !lv || tr.getAttribute('data-level') === lv;
+        var vis = okQ && okL;
+        tr.hidden = !vis;
+        if (vis) shown++;
+      });
+      if (stat) stat.textContent = '显示 ' + shown + ' / ' + rows.length + ' 个下游对象';
+    }
+    if (search) search.addEventListener('input', apply);
+    if (level) level.addEventListener('change', apply);
+    apply();
+  })();
+</script>
+{% endblock %}
