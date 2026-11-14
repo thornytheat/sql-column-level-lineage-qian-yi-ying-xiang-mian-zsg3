@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import graph, migrate, pipeline, report, seed, settings, store
+from . import changes, graph, migrate, pipeline, report, seed, settings, store
 
 BASE = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE / "templates"))
@@ -324,10 +324,30 @@ def review_page(
         conn.close()
 
 
+@app.get("/rehearsal", response_class=HTMLResponse)
+def rehearsal_page(request: Request):
+    conn = get_conn()
+    try:
+        runs = store.list_runs(conn, limit=12)
+        schemas = store.load_schemas(conn)
+        sessions = store.list_change_sessions(conn, limit=10)
+        ctx = base_context(request, "rehearsal")
+        ctx.update(
+            {
+                "runs": runs,
+                "schemas": sorted(schemas.items()),
+                "sessions": sessions,
+                "default_run_id": runs[0]["run_id"] if runs else "",
+            }
+        )
+        return templates.TemplateResponse(request, "rehearsal.html", ctx)
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------------------
 # API
 # --------------------------------------------------------------------------
-
 @app.get("/health")
 def health():
     conn = get_conn()
@@ -533,3 +553,100 @@ def api_impact_export(run_id: str, table: str, column: str | None = None, operat
             "Content-Disposition": f'attachment; filename="lineagex_{table}_{column or "all"}_impact.json"'
         },
     )
+
+
+# --------------------------------------------------------------------------
+# 整组变更演练：候选 schema 预演 + 分层影响 + 两阶段切换（幂等）
+# --------------------------------------------------------------------------
+
+def _validate_change_payload(payload: dict) -> list[dict]:
+    raw = payload.get("changes")
+    if not isinstance(raw, list) or not raw:
+        raise HTTPException(status_code=400, detail="changes 必须是非空数组，每项含 table / action")
+    for item in raw:
+        if not item.get("table") or not item.get("action"):
+            raise HTTPException(status_code=400, detail="每条变更都必须包含 table 与 action")
+        if item["action"] not in changes.VALID_ACTIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"不支持的变更动作 {item['action']}；可选 {', '.join(changes.VALID_ACTIONS)}",
+            )
+    return raw
+
+
+@app.post("/api/change-sessions")
+def api_create_change_session(payload: dict = Body(default={})):
+    run_id = str(payload.get("run_id") or "")
+    if not run_id:
+        raise HTTPException(status_code=400, detail="缺少 run_id（基线解析记录）")
+    raw = _validate_change_payload(payload)
+    conn = get_conn()
+    try:
+        try:
+            result = pipeline.rehearse_changes(conn, raw, run_id)
+        except changes.ChangeValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        plan = result["plan"]
+        return {
+            "session_id": result["session_id"],
+            "reused": result["reused"],
+            "fingerprint": plan["fingerprint"],
+            "status": plan["status"],
+            "ready": plan["ready"],
+            "affected_object_count": plan["affected_object_count"],
+            "rebuild_views": plan["rebuild_views"],
+            "backfill_tables": plan["backfill_tables"],
+            "star_objects": [o["object"] for o in plan["star_objects"]],
+            "step_count": plan["step_count"],
+            "replay": {
+                "ok": plan["replay"]["ok"],
+                "parsed_count": plan["replay"]["parsed_count"],
+                "failed_count": plan["replay"]["failed_count"],
+                "total_count": plan["replay"]["total_count"],
+            },
+            "warnings": plan["warnings"],
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/change-sessions")
+def api_list_change_sessions(limit: int = 20):
+    conn = get_conn()
+    try:
+        return {"sessions": store.list_change_sessions(conn, limit=limit)}
+    finally:
+        conn.close()
+
+
+@app.get("/api/change-sessions/{session_id}")
+def api_get_change_session(session_id: str):
+    conn = get_conn()
+    try:
+        record = store.get_change_session(conn, session_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"找不到演练会话 {session_id}")
+        return record
+    finally:
+        conn.close()
+
+
+@app.post("/api/change-sessions/{session_id}/decision")
+def api_decide_change_session(session_id: str, payload: dict = Body(default={})):
+    approve = bool(payload.get("approve"))
+    conn = get_conn()
+    try:
+        try:
+            record = pipeline.decide_change_session(conn, session_id, approve)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        return {
+            "session_id": session_id,
+            "status": record["plan"]["status"],
+            "ready": record["plan"]["ready"],
+            "rollback": record["plan"].get("rollback", ""),
+        }
+    finally:
+        conn.close()

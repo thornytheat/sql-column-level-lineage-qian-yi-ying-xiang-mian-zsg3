@@ -105,6 +105,22 @@ CREATE TABLE IF NOT EXISTS run_cycles (
   scripts_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_rc_run ON run_cycles(run_id);
+
+-- 整组变更演练会话：按「基线 run + 变更指纹」幂等，重试同一组变更复用方案不重复生成
+CREATE TABLE IF NOT EXISTS change_sessions (
+  session_id TEXT PRIMARY KEY,
+  fingerprint TEXT NOT NULL,
+  base_run_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  ready INTEGER NOT NULL,
+  changes_json TEXT NOT NULL,
+  plan_json TEXT NOT NULL,
+  rollback_note TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cs_fingerprint ON change_sessions(fingerprint);
+CREATE INDEX IF NOT EXISTS idx_cs_base ON change_sessions(base_run_id);
 """
 
 
@@ -304,9 +320,93 @@ def stats(conn: sqlite3.Connection) -> dict:
         "broken_scripts": one("SELECT COUNT(*) FROM scripts WHERE set_name = 'broken'"),
         "schema_tables": one("SELECT COUNT(*) FROM schemas"),
         "runs": one("SELECT COUNT(*) FROM runs"),
+        "change_sessions": one("SELECT COUNT(*) FROM change_sessions"),
         "latest_run": (
             dict(conn.execute("SELECT * FROM runs ORDER BY created_at DESC, rowid DESC LIMIT 1").fetchone())
             if one("SELECT COUNT(*) FROM runs")
             else None
         ),
     }
+
+
+# --------------------------------------------------------------------------
+# 整组变更演练会话
+# --------------------------------------------------------------------------
+
+def save_change_session(conn: sqlite3.Connection, session_id: str, plan: dict) -> None:
+    """落库一次演练方案；同指纹已存在则不重复插入（幂等由唯一索引 + 先查保证）。"""
+    existing = get_change_session_by_fingerprint(conn, plan["fingerprint"])
+    if existing is not None:
+        return
+    now_ts = now()
+    conn.execute(
+        """INSERT INTO change_sessions(session_id, fingerprint, base_run_id, status, ready,
+                                       changes_json, plan_json, rollback_note, created_at, updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (
+            session_id,
+            plan["fingerprint"],
+            plan["base_run_id"],
+            plan["status"],
+            1 if plan["ready"] else 0,
+            json.dumps(plan["changes"], ensure_ascii=False),
+            json.dumps(plan, ensure_ascii=False),
+            plan.get("rollback", ""),
+            now_ts,
+            now_ts,
+        ),
+    )
+    conn.commit()
+
+
+def get_change_session(conn: sqlite3.Connection, session_id: str) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM change_sessions WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    data = dict(row)
+    data["plan"] = json.loads(data["plan_json"])
+    data["changes"] = json.loads(data["changes_json"])
+    return data
+
+
+def get_change_session_by_fingerprint(conn: sqlite3.Connection, fingerprint: str) -> dict | None:
+    row = conn.execute(
+        "SELECT session_id FROM change_sessions WHERE fingerprint = ?", (fingerprint,)
+    ).fetchone()
+    if row is None:
+        return None
+    return get_change_session(conn, row["session_id"])
+
+
+def list_change_sessions(conn: sqlite3.Connection, limit: int = 20) -> list[dict]:
+    rows = conn.execute(
+        "SELECT session_id, fingerprint, base_run_id, status, ready, changes_json, created_at, updated_at "
+        "FROM change_sessions ORDER BY created_at DESC, rowid DESC LIMIT ?",
+        (max(1, min(limit, 100)),),
+    ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["changes"] = json.loads(d.pop("changes_json"))
+        d["ready"] = bool(d["ready"])
+        out.append(d)
+    return out
+
+
+def update_change_session_plan(conn: sqlite3.Connection, session_id: str, plan: dict) -> None:
+    """状态机推进后，把完整新方案（含 status / rollback）一并写回。"""
+    conn.execute(
+        "UPDATE change_sessions SET status = ?, ready = ?, rollback_note = ?, plan_json = ?, updated_at = ? "
+        "WHERE session_id = ?",
+        (
+            plan["status"],
+            1 if plan["ready"] else 0,
+            plan.get("rollback", ""),
+            json.dumps(plan, ensure_ascii=False),
+            now(),
+            session_id,
+        ),
+    )
+    conn.commit()

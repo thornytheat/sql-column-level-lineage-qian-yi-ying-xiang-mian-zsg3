@@ -22,6 +22,7 @@
       <a href="/" class="{% if page == 'index' %}active{% endif %}"><span class="ico">总</span><span>总览</span></a>
       <a href="/workbench" class="{% if page == 'workbench' %}active{% endif %}"><span class="ico">台</span><span>SQL 工作台</span></a>
       <a href="/review" class="{% if page == 'review' %}active{% endif %}"><span class="ico">核</span><span>复核与导出</span></a>
+      <a href="/rehearsal" class="{% if page == 'rehearsal' %}active{% endif %}"><span class="ico">演</span><span>整组变更演练</span></a>
       <div class="side-group">业务模块</div>
       <a href="/workbench#m1"><span class="ico">1</span><span>SQL 录入</span></a>
       <a href="/workbench#m2"><span class="ico">2</span><span>解析诊断</span>{% if stats.latest_run and stats.latest_run.failed_count %}<span class="badge">{{ stats.latest_run.failed_count }}</span>{% endif %}</a>

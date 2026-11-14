@@ -1,14 +1,15 @@
 """编排层：读样例 → 解析 → 建图 → 算层级/环 → 落库。
 
-核心规则全部在 lineage / graph / migrate 三个纯函数模块里，这里只做组合与持久化。
+核心规则全部在 lineage / graph / migrate / changes 纯函数模块里，这里只做组合与持久化。
 """
 from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
-from . import graph, lineage, store
+from . import changes, graph, lineage, settings, store
 
 SAMPLE_LABEL = "样例仓库（12 个脚本）"
 SAMPLE_WITH_BROKEN_LABEL = "样例仓库 + 1 个坏脚本（13 个脚本）"
@@ -105,3 +106,66 @@ def run_sample(conn, sample_dir: Path, include_broken: bool = False) -> tuple[st
 def run_custom(conn, sql: str, filename: str, schemas: dict[str, list[str]]) -> tuple[str, dict]:
     files = [{"filename": filename or "自定义脚本.sql", "sql": sql}]
     return run_analysis(conn, files, schemas, f"自定义录入 · {files[0]['filename']}")
+
+
+# --------------------------------------------------------------------------
+# 整组变更演练（候选 schema 预演 + 幂等会话 + 两阶段切换）
+# --------------------------------------------------------------------------
+
+def _new_session_id(fingerprint: str) -> str:
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+    return f"chg_{ts}_{fingerprint}"
+
+
+def rehearse_changes(conn, raw_changes: list[dict], run_id: str) -> dict:
+    """对一组变更做候选演练并落会话；同指纹直接复用，不重复生成方案。
+
+    返回 {"session_id", "plan", "reused": bool}。
+    """
+    data = store.load_run(conn, run_id)
+    if data is None:
+        raise KeyError(f"找不到基线解析记录 {run_id}")
+
+    base_schemas = store.load_schemas(conn)
+    # 脚本产出对象的列也补进基线 schema，保证候选重放与基线口径一致
+    for s in data["scripts"]:
+        if s["status"] == "ok":
+            base_schemas.setdefault(s["target"], s["columns"])
+
+    sample_dir = settings.SAMPLE_DIR
+    files = load_sample_files(sample_dir)
+    # 以基线 run 实际录入的脚本为准（自定义 run 也能演练）
+    run_files = [{"filename": s["filename"], "sql": s["sql"]} for s in data["scripts"]]
+    if run_files:
+        files = run_files
+
+    chg = changes.changes_from_dicts(raw_changes)
+    fingerprint = changes.changes_fingerprint(chg, run_id)
+
+    existing = store.get_change_session_by_fingerprint(conn, fingerprint)
+    if existing is not None:
+        return {"session_id": existing["session_id"], "plan": existing["plan"], "reused": True}
+
+    # 用基线 run 落库的边重建 analysis，避免重新解析带来口径漂移
+    base_analysis = {
+        "column_edges": data["column_edges"],
+        "table_edges": data["table_edges"],
+        "scripts": data["scripts"],
+        "cycles": data["cycles"],
+    }
+    plan = changes.rehearse(chg, base_schemas, files, run_id, base_analysis)
+    session_id = _new_session_id(fingerprint)
+    store.save_change_session(conn, session_id, plan)
+    return {"session_id": session_id, "plan": plan, "reused": False}
+
+
+def decide_change_session(conn, session_id: str, approve: bool) -> dict:
+    """两阶段切换：确认 → applied；拒绝或重放失败 → rejected 并保留原结构。"""
+    record = store.get_change_session(conn, session_id)
+    if record is None:
+        raise KeyError(f"找不到演练会话 {session_id}")
+    plan = record["plan"]
+    updated = changes.apply_decision(plan, approve)
+    store.update_change_session_plan(conn, session_id, updated)
+    record = store.get_change_session(conn, session_id)
+    return record  # type: ignore[return-value]

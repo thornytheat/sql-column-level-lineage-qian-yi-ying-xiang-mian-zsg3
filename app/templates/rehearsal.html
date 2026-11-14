@@ -1,0 +1,343 @@
+{% extends "base.html" %}
+{% block title %}整组变更演练 · {{ app_name }}{% endblock %}
+{% block crumb %}整组变更演练{% endblock %}
+{% block meta %}<span class="dot ok"></span>候选 schema 预演 · 星号透传与跨层改名全量识别{% endblock %}
+{% block actions %}
+<a class="btn small" href="/review">回单列复核</a>
+{% endblock %}
+{% block status_left %}在候选表结构上演练，确认前不改动基线；失败保留原结构 · 同组变更幂等复用{% endblock %}
+{% block status_right %}{{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">整组源表变更演练（候选预演 → 确认 → 切换）</h1>
+    <p class="page-sub">
+      一次提交一组变更（加列 / 改名 / 改类型）。系统在<b>候选表结构</b>上重放全量脚本，
+      逐层列出<b>明确引用</b>与<b>星号透传</b>对象、需<b>重建的视图</b>与需<b>回填的物理表</b>；
+      改名沿列级血缘跨层传播，新增列经 <code>SELECT *</code> 自动透传也不会漏。
+      重放全绿才允许切换，失败则保留原结构；同一组变更重试复用同一方案，不重复生成。
+    </p>
+  </div>
+</div>
+
+{% if not runs %}
+<div class="panel"><div class="empty">
+  <strong>还没有任何解析记录</strong>
+  请先到工作台执行样例解析，再回来做整组变更演练。
+  <p><a class="btn small" href="/workbench">打开工作台</a></p>
+</div></div>
+{% else %}
+
+<section class="panel" style="margin-bottom:12px">
+  <div class="panel-head">
+    <h2>1. 选择基线并录入变更组</h2>
+    <div class="panel-actions"><span class="tag">幂等指纹 = 基线 + 变更组</span></div>
+  </div>
+  <div class="panel-body">
+    <div class="toolbar" style="margin-bottom:10px">
+      <label class="small muted" for="run_id">基线解析</label>
+      <select id="run_id" style="min-width:280px">
+        {% for r in runs %}
+        <option value="{{ r.run_id }}" {% if r.run_id == default_run_id %}selected{% endif %}>
+          {{ r.created_at }} · {{ r.source_label }}（{{ r.column_edge_count }} 列边）
+        </option>
+        {% endfor %}
+      </select>
+      <button type="button" class="btn secondary small" id="btn-preset">填入本次三组变更</button>
+    </div>
+
+    <div class="table-wrap roomy">
+      <table class="dense" id="change-table">
+        <thead>
+          <tr><th style="width:150px">源表</th><th style="width:150px">动作</th><th>旧列名（改名/改类型）</th><th>新列名（加列/改名）</th><th>新类型（加列/改类型）</th><th style="width:60px"></th></tr>
+        </thead>
+        <tbody id="change-rows"></tbody>
+      </table>
+    </div>
+    <div class="panel-actions" style="padding-left:0">
+      <button type="button" class="btn secondary small" id="btn-add-row">+ 增加一条变更</button>
+      <span class="spacer"></span>
+      <button type="button" class="btn small" id="btn-rehearse">在候选表结构上演练</button>
+    </div>
+    <div id="form-error" class="alert alert-error small" style="display:none;margin-top:8px"></div>
+  </div>
+</section>
+
+<section class="panel" id="session-panel" style="display:none">
+  <div class="panel-head">
+    <h2>2. 演练结论</h2>
+    <div class="panel-actions">
+      <span class="tag" id="tag-fp"></span>
+      <span class="tag" id="tag-status"></span>
+      <span class="tag ok" id="tag-reuse" style="display:none">复用已有方案</span>
+    </div>
+  </div>
+  <div class="panel-body" id="session-body"></div>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>历史演练会话</h2><div class="panel-actions"><span class="tag">{{ sessions|length }} 条</span></div></div>
+  <div class="table-wrap">
+    <table class="dense">
+      <thead><tr><th>会话</th><th>基线</th><th>状态</th><th>可切换</th><th>变更</th><th>更新时间</th><th></th></tr></thead>
+      <tbody>
+      {% for s in sessions %}
+        <tr>
+          <td class="mono small nowrap">{{ s.session_id }}</td>
+          <td class="mono small">{{ s.base_run_id }}</td>
+          <td><span class="tag {% if s.status == 'applied' %}ok{% elif s.status == 'rejected' %}err{% else %}warn{% endif %}">{{ s.status }}</span></td>
+          <td>{% if s.ready %}<span class="tag ok">是</span>{% else %}<span class="tag err">否</span>{% endif %}</td>
+          <td class="small">{{ s.changes|length }} 条</td>
+          <td class="small nowrap">{{ s.updated_at }}</td>
+          <td><a class="small" href="javascript:void(0)" data-load="{{ s.session_id }}">查看</a></td>
+        </tr>
+      {% else %}
+        <tr><td colspan="7" class="muted small">还没有演练会话，提交一组变更后会出现在这里。</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  var tableOptions = {{ schemas | tojson }};
+  var ACTIONS = [
+    ["add_column", "加列 ADD COLUMN"],
+    ["rename_column", "改名 RENAME COLUMN"],
+    ["alter_type", "改类型 ALTER TYPE"]
+  ];
+  var rowsEl = document.getElementById('change-rows');
+  if (!rowsEl) return;
+
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+
+  function rowHtml(v) {
+    v = v || {};
+    var opts = ACTIONS.map(function (a) {
+      return '<option value="' + a[0] + '"' + (v.action === a[0] ? ' selected' : '') + '>' + a[1] + '</option>';
+    }).join('');
+    var tops = tableOptions.map(function (t) {
+      return '<option value="' + esc(t[0]) + '"' + (v.table === t[0] ? ' selected' : '') + '>' + esc(t[0]) + '</option>';
+    }).join('');
+    return '<tr>'
+      + '<td><select class="f-table" style="width:100%">' + tops + '</select></td>'
+      + '<td><select class="f-action" style="width:100%">' + opts + '</select></td>'
+      + '<td><input class="f-column" value="' + esc(v.column) + '" placeholder="如 sku / amount"></td>'
+      + '<td><input class="f-newname" value="' + esc(v.new_name) + '" placeholder="如 product_sku / brand_code"></td>'
+      + '<td><input class="f-newtype" value="' + esc(v.new_type) + '" placeholder="如 varchar(32) / decimal(18,4)"></td>'
+      + '<td><button type="button" class="btn secondary small f-del">删</button></td>'
+      + '</tr>';
+  }
+  function addRow(v) { rowsEl.insertAdjacentHTML('beforeend', rowHtml(v)); }
+  function collect() {
+    return Array.prototype.slice.call(rowsEl.querySelectorAll('tr')).map(function (tr) {
+      return {
+        table: tr.querySelector('.f-table').value,
+        action: tr.querySelector('.f-action').value,
+        column: tr.querySelector('.f-column').value.trim(),
+        new_name: tr.querySelector('.f-newname').value.trim(),
+        new_type: tr.querySelector('.f-newtype').value.trim()
+      };
+    });
+  }
+
+  document.getElementById('btn-add-row').addEventListener('click', function () { addRow(); });
+  document.getElementById('btn-preset').addEventListener('click', function () {
+    rowsEl.innerHTML = '';
+    addRow({table: 'ods_products', action: 'add_column', new_name: 'brand_code', new_type: 'varchar(32)'});
+    addRow({table: 'ods_products', action: 'rename_column', column: 'sku', new_name: 'product_sku'});
+    addRow({table: 'ods_orders', action: 'alter_type', column: 'amount', new_type: 'decimal(18,4)'});
+  });
+  rowsEl.addEventListener('click', function (e) {
+    if (e.target.classList.contains('f-del')) e.target.closest('tr').remove();
+  });
+  addRow();
+
+  function showError(msg) {
+    var el = document.getElementById('form-error');
+    if (!msg) { el.style.display = 'none'; el.textContent = ''; return; }
+    el.style.display = 'block'; el.textContent = msg;
+  }
+
+  function statusTag(status) {
+    var map = {draft: ['warn', '待确认 draft'], confirmed: ['warn', '已确认 confirmed'],
+      applied: ['ok', '已切换 applied'], rejected: ['err', '已拒绝/保留原结构 rejected']};
+    return map[status] || ['', status];
+  }
+  function levelLabel(lv) { return lv === null || lv === undefined ? '<span class="tag err">环内</span>' : 'L' + lv; }
+  function hitTags(hits) {
+    return (hits || []).map(function (h) {
+      return h === 'star' ? '<span class="tag warn">星号透传</span>' : '<span class="tag">明确引用</span>';
+    }).join(' ');
+  }
+  function evList(evs) {
+    return (evs || []).map(function (e) { return esc(e.script + ':' + e.line); }).join('<br>');
+  }
+
+  function renderPlan(plan, reused) {
+    document.getElementById('session-panel').style.display = '';
+    document.getElementById('tag-fp').textContent = '指纹 ' + plan.fingerprint;
+    var st = statusTag(plan.status);
+    var tag = document.getElementById('tag-status');
+    tag.className = 'tag ' + st[0]; tag.textContent = st[1];
+    document.getElementById('tag-reuse').style.display = reused ? '' : 'none';
+
+    var html = '';
+    // KPI
+    html += '<div class="kpi-strip">'
+      + kpi('受影响对象', plan.affected_object_count, '逐层统计')
+      + kpi('重建视图', plan.rebuild_views.length, plan.rebuild_views.join('、') || '无')
+      + kpi('回填物理表', plan.backfill_tables.length, plan.backfill_tables.join('、') || '无')
+      + kpi('重放脚本', plan.replay.parsed_count + '/' + plan.replay.total_count, '失败 ' + plan.replay.failed_count)
+      + '</div>';
+
+    // DDL 预览
+    html += '<h3 class="small">源表 DDL 预览（最后执行）</h3><pre>' + plan.ddl_preview.map(esc).join('\n') + '</pre>';
+
+    // 重放结论
+    html += '<div class="alert ' + (plan.replay.ok ? 'alert-info' : 'alert-error') + ' small">'
+      + (plan.replay.ok ? '候选 schema 重放全绿，允许在确认后切换。' : '候选 schema 重放存在失败，禁止切换，已保留原结构。')
+      + '（成功 ' + plan.replay.parsed_count + ' / 失败 ' + plan.replay.failed_count + '）</div>';
+    if (plan.replay.failed_scripts && plan.replay.failed_scripts.length) {
+      html += '<div class="table-wrap auto"><table class="dense"><thead><tr><th>脚本</th><th>位置</th><th>原因</th></tr></thead><tbody>'
+        + plan.replay.failed_scripts.map(function (f) {
+          return '<tr><td class="mono">' + esc(f.filename) + '</td><td>第 ' + (f.line||'-') + ' 行第 ' + (f.col||'-') + ' 列</td><td>' + esc(f.message) + '</td></tr>';
+        }).join('') + '</tbody></table></div>';
+    }
+
+    // 分层对象
+    html += '<h3 class="small" style="margin-top:14px">逐层影响对象（明确引用 / 星号透传 / 重建 / 回填）</h3>';
+    html += '<div class="table-wrap roomy"><table class="dense"><thead><tr>'
+      + '<th>层级</th><th>对象</th><th>类型</th><th>命中方式</th><th>受影响列（基线 → 候选）</th><th>动作</th><th>依据</th></tr></thead><tbody>';
+    plan.affected_objects.forEach(function (o) {
+      var cols = o.column_details.map(function (d) {
+        var arrow = d.candidate_columns.join(',');
+        var same = d.base_columns.join(',') === arrow;
+        return esc(d.base_columns.join(',') || '（新增）') + (same ? '' : ' → <b>' + esc(arrow) + '</b>');
+      }).join('<br>');
+      var act = o.rebuild ? '<span class="tag warn">重建视图</span>' : '<span class="tag">回填物理表</span>';
+      html += '<tr><td>' + levelLabel(o.level) + '</td><td class="mono nowrap">' + esc(o.object) + '</td>'
+        + '<td>' + (o.kind === 'view' ? '视图' : '表') + '</td>'
+        + '<td>' + hitTags(Array.from(new Set(o.column_details.reduce(function (a, d) { return a.concat(d.hits); }, [])))) + '</td>'
+        + '<td class="mono small">' + cols + '</td><td>' + act + '</td>'
+        + '<td class="small mono">' + evList(o.evidence) + '</td></tr>';
+    });
+    html += '</tbody></table></div>';
+
+    // 改名跨层
+    if (plan.rename_propagation.length) {
+      html += '<h3 class="small" style="margin-top:14px">改名跨层传播（旧列名 → 新列名）</h3>';
+      plan.rename_propagation.forEach(function (r) {
+        html += '<p class="small mono" style="margin:4px 0">' + esc(r.table + '.' + r.from_column) + ' → <b>' + esc(r.to_column) + '</b></p>';
+        html += chainTable(r.downstream_chain);
+      });
+    }
+    // 加列透传
+    if (plan.add_propagation.length) {
+      html += '<h3 class="small" style="margin-top:14px">新增列的星号透传（旧清单最易漏）</h3>';
+      plan.add_propagation.forEach(function (r) {
+        html += '<p class="small mono" style="margin:4px 0">' + esc(r.table) + ' 新增 ' + esc(r.new_column) + ' ' + esc(r.new_type||'') + '</p>';
+        if (!r.downstream_chain.length) html += '<p class="small muted">无下游对象引用。</p>';
+        else html += chainTable(r.downstream_chain);
+      });
+    }
+    // 类型传播
+    if (plan.type_propagation.length) {
+      html += '<h3 class="small" style="margin-top:14px">类型变更传播（精度 / CAST 口径）</h3>';
+      plan.type_propagation.forEach(function (r) {
+        html += '<p class="small mono" style="margin:4px 0">' + esc(r.table + '.' + r.column) + ' → ' + esc(r.new_type) + '</p>';
+        html += '<div class="table-wrap auto"><table class="dense"><thead><tr><th>层级</th><th>对象</th><th>列</th><th>命中</th><th>变换链</th></tr></thead><tbody>'
+          + r.downstream_chain.map(function (d) {
+            return '<tr><td>' + levelLabel(d.level) + '</td><td class="mono">' + esc(d.object) + '</td>'
+              + '<td class="mono small">' + esc(d.base_columns.join(',')) + '</td><td>' + hitTags(d.hits) + '</td>'
+              + '<td class="small mono">' + esc((d.transforms||[]).map(function(t){return t.join('(');}).join(' | ') || '直接引用') + '</td></tr>';
+          }).join('') + '</tbody></table></div>';
+      });
+    }
+
+    // 步骤
+    html += '<h3 class="small" style="margin-top:14px">有序切换步骤（' + plan.step_count + ' 步）</h3><ol class="steps">'
+      + plan.steps.map(function (s) {
+        var body = '<div><strong>' + s.order + '. ' + esc(s.title) + '</strong> <span class="tag">' + esc(s.action) + '</span></div>'
+          + '<div class="small muted">' + esc(s.detail) + '</div>';
+        if (s.ddl) body += '<pre>' + s.ddl.map(esc).join('\n') + '</pre>';
+        return '<li style="display:block">' + body + '</li>';
+      }).join('') + '</ol>';
+
+    // 警告
+    if (plan.warnings && plan.warnings.length) {
+      html += '<div class="alert alert-info small">' + plan.warnings.map(function (w) { return '<div>· ' + esc(w) + '</div>'; }).join('') + '</div>';
+    }
+
+    // 决策按钮
+    if (plan.status === 'draft' || plan.status === 'confirmed') {
+      html += '<div class="panel-actions" style="padding-left:0;margin-top:10px">'
+        + '<button type="button" class="btn small" id="btn-approve" ' + (plan.ready ? '' : 'disabled') + '>确认并切换（' + (plan.ready ? '重放全绿' : '重放未过，禁用') + '）</button>'
+        + '<button type="button" class="btn secondary small" id="btn-reject">放弃切换，保留原结构</button>'
+        + '</div>';
+    } else {
+      html += '<div class="alert ' + (plan.status === 'applied' ? 'alert-info' : 'alert-error') + ' small">终态：' + esc(plan.status)
+        + (plan.rollback ? ' — ' + esc(plan.rollback) : '') + '</div>';
+    }
+    document.getElementById('session-body').innerHTML = html;
+
+    var ap = document.getElementById('btn-approve');
+    var rj = document.getElementById('btn-reject');
+    if (ap) ap.addEventListener('click', function () { decide(true); });
+    if (rj) rj.addEventListener('click', function () { decide(false); });
+  }
+
+  function kpi(label, value, note) {
+    return '<div class="kpi"><div class="k-label">' + esc(label) + '</div><div class="k-value">' + esc(value) + '</div><div class="k-note">' + esc(note) + '</div></div>';
+  }
+  function chainTable(chain) {
+    return '<div class="table-wrap auto"><table class="dense"><thead><tr><th>层级</th><th>对象</th><th>基线列</th><th>候选列</th><th>命中</th><th>依据</th></tr></thead><tbody>'
+      + chain.map(function (d) {
+        return '<tr><td>' + levelLabel(d.level) + '</td><td class="mono">' + esc(d.object) + '</td>'
+          + '<td class="mono small">' + esc((d.base_columns||[]).join(',') || '—') + '</td>'
+          + '<td class="mono small"><b>' + esc((d.candidate_columns||[]).join(',')) + '</b></td>'
+          + '<td>' + hitTags(d.hits) + '</td><td class="small mono">' + evList(d.evidence) + '</td></tr>';
+      }).join('') + '</tbody></table></div>';
+  }
+
+  var currentSid = null;
+  document.getElementById('btn-rehearse').addEventListener('click', function () {
+    showError('');
+    var changes = collect().filter(function (c) { return c.table && c.action; });
+    if (!changes.length) { showError('至少录入一条变更。'); return; }
+    fetch('/api/change-sessions', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({run_id: document.getElementById('run_id').value, changes: changes})
+    }).then(function (r) {
+      return r.json().then(function (j) { return {ok: r.ok, j: j}; });
+    }).then(function (res) {
+      if (!res.ok) { showError(typeof res.j.detail === 'string' ? res.j.detail : JSON.stringify(res.j.detail)); return; }
+      currentSid = res.j.session_id;
+      return loadSession(currentSid, res.j.reused);
+    }).catch(function (e) { showError('请求失败：' + e); });
+  });
+
+  function loadSession(sid, reused) {
+    currentSid = sid;
+    return fetch('/api/change-sessions/' + encodeURIComponent(sid)).then(function (r) { return r.json(); })
+      .then(function (rec) { renderPlan(rec.plan, !!reused); window.scrollTo({top: document.getElementById('session-panel').offsetTop - 20, behavior: 'smooth'}); });
+  }
+  function decide(approve) {
+    if (!currentSid) return;
+    fetch('/api/change-sessions/' + encodeURIComponent(currentSid) + '/decision', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({approve: approve})
+    }).then(function (r) { return r.json(); }).then(function () { loadSession(currentSid, true); });
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll('[data-load]'), function (a) {
+    a.addEventListener('click', function () { loadSession(a.getAttribute('data-load'), true); });
+  });
+})();
+</script>
+{% endblock %}

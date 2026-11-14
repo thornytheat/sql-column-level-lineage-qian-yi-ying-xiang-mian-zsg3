@@ -9,6 +9,7 @@
 - 环检测：表级与列级依赖图 DFS 三色，输出环路径与产生环的脚本行。
 - 影响面：输入表或列，按拓扑层级从浅到深列出全部下游对象，标注直接 / 间接与受影响列。
 - 迁移清单：删列 / 改名 → 生成有序步骤（冻结 → 逐层改下游 → 回填物理表 → 最后 DDL），附导出的 JSON / CSV。
+- 整组变更演练：一次提交一组「加列 / 改名 / 改类型」，在**候选表结构**上重放全量脚本；逐层列出明确引用与**星号透传**对象、需重建的视图与需回填的物理表，改名沿列级血缘跨层传播、新增列经 `SELECT *` 自动透传也不漏；重放全绿才允许两阶段切换，失败保留原结构，同组变更按指纹幂等复用方案。
 
 ## 核心规则
 
@@ -39,10 +40,11 @@ open http://127.0.0.1:18214/
 2. 结果页按目标表看列级关系，每条边带 `脚本:行号`、原表达式与函数变换链。
 3. 工作台点「解析样例 + 坏脚本」或粘贴自定义 SQL（例如括号未闭合）→ 看到 `第 5 行第 8 列 括号未闭合` 这类定位。
 4. `/review` 选 `ods_orders.amount` + 删列 → 5 个下游对象、6 步迁移清单；导出 JSON / CSV。
+5. `/rehearsal` 点「填入本次三组变更」→ 演练：6 个受影响对象，其中 `v_product_sales`、`dws_order_wide` 为星号透传；`brand_code` 经 `SELECT *` 自动透传到 `v_product_sales`，`sku→product_sku` 给出基线/候选列对照；重放 12/12 全绿后可确认切换，或放弃并保留原结构。重复提交同一组变更返回同一会话（`reused=true`）。
 
 ## API / 页面
 
-页面：`/`（场景与样例概览）、`/workbench`（录入与执行）、`/result/{run_id}`（结论与依据）、`/review`（影响面 + 迁移 + 导出）。
+页面：`/`（场景与样例概览）、`/workbench`（录入与执行）、`/result/{run_id}`（结论与依据）、`/review`（影响面 + 迁移 + 导出）、`/rehearsal`（整组变更演练 + 两阶段切换）。
 
 API：
 
@@ -59,6 +61,19 @@ curl -s -X POST http://127.0.0.1:18214/api/impact -H 'Content-Type: application/
   -d '{"run_id":"<run_id>","table":"ods_orders","column":"amount"}'
 curl -s -X POST http://127.0.0.1:18214/api/migration -H 'Content-Type: application/json' \
   -d '{"run_id":"<run_id>","table":"ods_orders","column":"amount","operation":"drop"}'
+
+# 整组变更演练（候选 schema 预演；同组变更重试返回 reused=true，不重复生成方案）
+curl -s -X POST http://127.0.0.1:18214/api/change-sessions -H 'Content-Type: application/json' -d '{
+  "run_id":"<run_id>",
+  "changes":[
+    {"table":"ods_products","action":"add_column","new_name":"brand_code","new_type":"varchar(32)"},
+    {"table":"ods_products","action":"rename_column","column":"sku","new_name":"product_sku"},
+    {"table":"ods_orders","action":"alter_type","column":"amount","new_type":"decimal(18,4)"}
+  ]}'
+curl -s http://127.0.0.1:18214/api/change-sessions/<session_id>
+# 两阶段切换：approve=true 且重放全绿才 applied；否则 rejected 并保留原结构
+curl -s -X POST http://127.0.0.1:18214/api/change-sessions/<session_id>/decision \
+  -H 'Content-Type: application/json' -d '{"approve":true}'
 curl -s -o edges.csv "http://127.0.0.1:18214/api/runs/<run_id>/export?format=csv"
 curl -s -o run.json  "http://127.0.0.1:18214/api/runs/<run_id>/export?format=json"
 ```
@@ -73,14 +88,15 @@ app/
   parser.py      # 递归下降：语句 / 选择列表 / FROM / 子查询 / UNION
   lineage.py     # 列级血缘：别名传播、函数变换链、star 展开、诊断
   graph.py       # 环（三色 DFS）、拓扑层级、影响面
-  migrate.py     # 迁移清单生成
-  pipeline.py    # 编排：读样例 → 解析 → 建图 → 落库
-  store.py       # SQLite 表与读写
+  migrate.py     # 单列迁移清单生成
+  changes.py     # 整组变更演练：候选 schema、星号透传、跨层改名、重放门禁、状态机
+  pipeline.py    # 编排：读样例 → 解析 → 建图 → 落库 / 演练会话
+  store.py       # SQLite 表与读写（含 change_sessions 幂等会话）
   seed.py        # 幂等 seed + 基线解析
   report.py      # 分组视图、诊断片段、导出
   main.py        # FastAPI 路由（薄）
 sample_data/sql/（12 个）、sql_broken/（1 个）、schemas/（7 张表）
-tests/           # parser / lineage / graph / api
+tests/           # parser / lineage / graph / api / changes / change_api
 ```
 
 ## 已知限制
